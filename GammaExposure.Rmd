@@ -1,0 +1,310 @@
+---
+title: "Gamma"
+author: "Aamina Thasneem Khaleel"
+date: "2023-12-26"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Gamma Exposure 
+
+Credit given to Toby Moran for gamma exposure calculations and chart development techniques for SPX
+
+I added my own charts for AAPL and SOFI, and LCID. Since I have an interest in exploring trends within midcap stocks, I chose SOFI and LCID based on revenue and past earnings report.
+
+Future Plans for the Project:
+ - updating spot price for accuracy
+ - pulling live data to report GEX charts in real-time
+ - calculating gamma exposure based on expiration date
+
+Looking for total put and call gamma at each strike  
+
+total gamma at each strike
+
+Libraries that I will be using
+
+```{r}
+library(data.table)
+library(lubridate)
+library(timeDate)
+library(stringr)
+library(formattable)
+library(dplyr)
+library(plotly)
+library(tidyr)
+library(purrr)
+```
+will be using fread which is faster and more convenient than read.table or read.csv
+
+```{r}
+#option chain data
+optionChain <-fread("./spx_quotedata-2.csv")
+lastSalePrices <- optionChain[, "Last Sale"]
+lastSalePrices
+spotLine <- fread("./spx_quotedata-2.csv", skip=3, nrows = 1)
+spotLine
+spotLineData <- colnames(spotLine[,3])
+ # strsplit(as.character(colnames(spotLine[,3])), ":")
+spotLineData
+#obtained spot price for first row
+spotPrice <- as.numeric(spotLine[1,3])
+  #as.numeric(str_trim(spotLineData[[3]][1]))
+spotPrice
+
+#range of spot prices
+fromS = 0.8*spotPrice
+toS = 1.2*spotPrice
+```
+#Extracting current data of the spot price
+
+```{r}
+dateLine <- fread("./spx_quotedata-2.csv",skip =3, nrows = 1)
+dateLine
+todaysDateData <- strsplit(as.character(dateLine[,1]), " ")
+# strsplit(as.character(colnames(dateLine[,1])), " ")
+todaysDateData
+
+todayYear <- todaysDateData[[1]][4]
+todayMonth <- todaysDateData[[1]][2]
+todayDay <- todaysDateData[[1]][3]
+#using lubridate
+todayDate <-as.Date(ymd(paste0(todayYear, '-', todayMonth, '-', todayDay)))
+todayDate
+```
+
+Fixing the option chain column names
+```{r}
+colnames(optionChain) <-c('ExpirationDate','Calls','CallLastSale','CallNet','CallBid','CallAsk','CallVol',
+'CallIV','CallDelta','CallGamma','CallOpenInt','StrikePrice','Puts','PutLastSale',
+'PutNet','PutBid','PutAsk','PutVol','PutIV','PutDelta','PutGamma','PutOpenInt')
+#changing the date format
+optionChain$ExpirationDate <-as.Date(mdy(substring(optionChain$ExpirationDate,5)))
+
+```
+
+Will be calculating if the expiration is the third Friday of the month (monthly option expiration)
+
+Note: SPX is for monthly expiration and SPXW is for weekly expiration
+
+```{r}
+#create another column
+#need to use str split
+expiration <- fread("./spx_quotedata-2.csv",skip =3, nrows = 1)
+expiration
+#expr <- strsplit(as.character(optionChain$Calls), "W")
+
+expr <- sapply(strsplit(as.character(expiration[,2]), "W"), function(x) x[1])
+sapply
+expr
+#using grepl and ifelse to determine monthly expiration
+optionChain$monthlyExpiration <- ifelse(grepl("W", as.character(expiration[, 2])), FALSE, TRUE)
+
+```
+Calculating Gamma Spot Exposure
+
+Option’s Gamma * Contract Size * Open Interest * Spot Price ^ 2 * 0.01
+
+Call Gamma is positive
+
+Put Gamma is negative
+
+```{r}
+optionChain$CallGEX <- optionChain$CallGamma * 100 * optionChain$CallOpenInt * spotPrice^2 *0.01
+optionChain$PutGEX <- optionChain$PutGamma * 100 * optionChain$PutOpenInt * spotPrice^2 *0.01 * -1
+optionChain$TotalGamma <- (optionChain$CallGEX + optionChain$PutGEX) / 10^9
+#calculate the negative and pos
+# strike (gamma * Open Interest * 100) and puts (gamma * Open Interest *-100)
+#create a dataframe for plotting gex charts (both put, calls , and total gamma)
+#range is +/ 20% of spot price
+df <- optionChain %>% 
+  filter(StrikePrice > fromS, StrikePrice < toS) %>%
+  group_by(StrikePrice) %>% 
+  summarise(CallGEX = sum(CallGEX), PutGEX = sum(PutGEX), TotalGamma = sum(TotalGamma))
+#plotting variables
+strike <- optionChain$StrikePrice
+TotalGam <- round(sum(df$TotalGamma),3)
+```
+
+# Spot Gamma Exposure Chart
+
+Total Gamma exposure over specified strike price range
+
+```{r}
+spotExpChart <- plot_ly(df,x= ~StrikePrice, y = ~TotalGamma, type = "bar", name = "Total Gamma")
+spotExpChart <- spotExpChart %>% add_lines(x=spotPrice, line=list(color= "blue", dash = 'dot'), name= paste('Spot Price: ', round(spotPrice,0)))
+spotExpChart <- spotExpChart %>%layout(
+  title = paste("Total Gamma: $", TotalGam,  " Bn per 1% SPX Move ",  todayDate),
+  xaxis=list(title='Strike Price'),
+  yaxis=list(title='Spot Gamma Exposure ($ billions/1% move)')
+)
+spotExpChart
+```
+
+The graph above depicts the total gamma in billions per 1% of SPX move. There is a large amount of put gamma. 
+
+Majority of calls are from covered calls (when an investor buys the underlying stock and sells the a call option). The market maker is long calls and short on the underlying stock. As price of the underlying stock increases, delta needs to be hedged and the market maker will sell.
+
+Refer to this link to learn more about GEX (and its interpretation): https://help.quantdata.us/en/articles/7852449-what-is-gamma-exposure-gex
+
+# Call and Put GEX Chart (for options)
+```{r}
+cpGEX <- plot_ly(data = df, x = ~StrikePrice, y = ~CallGEX, type = 'bar', name = 'Call Gamma')
+cpGEX <- cpGEX %>% add_bars(
+  x = ~StrikePrice,
+  y = ~PutGEX,
+  marker = list(color = 'red'),
+  name = 'Put Gamma'
+)
+cpGEX <- cpGEX %>% add_lines(x=spotPrice,
+                               line=list(color= 'blue', dash = 'dot'),
+                               name= paste('Spot Price: ', round(spotPrice,0))
+)
+cpGEX <- cpGEX %>%layout(
+  title = paste("Total Gamma: $", TotalGam,  " Bn per 1% SPX Move ",  todayDate),
+  xaxis=list(title='Strike Price'),
+  yaxis=list(title='Spot Gamma Exposure ($ billions/1% move)')
+)
+cpGEX
+```
+
+# Call Put Gex Charts for Stocks
+## AAPL
+```{r}
+#obtain the last price
+aaplOptChain <-fread("./aapl_quotedata.csv")
+spotLine1 <- fread("./aapl_quotedata.csv", skip=3, nrows = 1)
+spotPrice1 <- as.numeric((spotLine1[1,3]))
+spotPrice1
+#spotPrice range
+fromS1 <- 0.8 * spotPrice1
+toS1 <- 2.3 * spotPrice1
+todaysDateData1 <-strsplit(as.character(spotLine1[,1]), " ")
+todayYear1 <- todaysDateData1[[1]][4]
+todayMonth1 <- todaysDateData1[[1]][2]
+todayDay1 <- todaysDateData1[[1]][3]
+todayDate1 <-as.Date(ymd(paste0(todayYear1, '-', todayMonth1, '-', todayDay1)))
+todayDate1
+colnames(aaplOptChain) <-c('ExpirationDate','Calls','CallLastSale','CallNet','CallBid','CallAsk','CallVol',
+'CallIV','CallDelta','CallGamma','CallOpenInt','StrikePrice','Puts','PutLastSale',
+'PutNet','PutBid','PutAsk','PutVol','PutIV','PutDelta','PutGamma','PutOpenInt')
+aaplOptChain$CallGEX <- aaplOptChain$CallGamma * 100 * aaplOptChain$CallOpenInt * spotPrice1^2 *0.01
+aaplOptChain$PutGEX <- aaplOptChain$PutGamma * 100 * aaplOptChain$PutOpenInt * spotPrice1^2 *0.01 * -1
+aaplOptChain$TotalGamma <- (aaplOptChain$CallGEX + aaplOptChain$PutGEX) / 971
+df1 <- aaplOptChain %>% 
+  filter(StrikePrice > fromS1, StrikePrice < toS1) %>%
+  group_by(StrikePrice) %>% 
+  summarise(CallGEX = sum(CallGEX), PutGEX = sum(PutGEX), TotalGamma = sum(TotalGamma))
+strike1 <- aaplOptChain$StrikePrice
+TotalGam1 <- round(sum(df1$TotalGamma),3)
+aaplSpotExpChart <- plot_ly(df1,x= ~df1$StrikePrice, y = ~df1$TotalGamma, type = "bar", name = "Total Gamma")
+aaplSpotExpChart <- aaplSpotExpChart %>% add_lines(x=spotPrice1, line=list(color= "blue", dash = 'dot'), name= paste('Spot Price: ', round(spotPrice1,0)))
+aaplSpotExpChart <- aaplSpotExpChart %>%layout(
+  title = paste("Total Gamma: $", TotalGam1,  " AAPL",  todayDate1),
+  xaxis=list(title='Strike Price'),
+  yaxis=list(title='Spot Gamma Exposure ')
+)
+aaplSpotExpChart
+
+aaplCPGEX <- plot_ly(data = df1, x = ~StrikePrice, y = ~CallGEX, type = 'bar', name = 'Call Gamma')
+aaplCPGEX <- aaplCPGEX %>% add_bars(x = ~StrikePrice,
+y = ~PutGEX, marker = list(color = 'red'), name = 'Put Gamma')
+aaplCPGEX <- aaplCPGEX %>% add_lines(x=spotPrice1,
+ line=list(color= 'blue', dash = 'dot'), name= paste('Spot Price: ', round(spotPrice1,0)))
+aaplCPGEX <- aaplCPGEX %>%layout(title = paste("Total Gamma: $", TotalGam1,  "AAPL Move ",  todayDate1), xaxis=list(title='Strike Price'),yaxis=list(title='Spot Gamma Exposure'))
+aaplCPGEX
+```
+Analysis: 
+
+Interest in Small and Midcap stocks
+
+# SOFI
+```{r}
+#obtain the last price
+sofiOptChain <-fread("./sofi_quotedata.csv")
+spotLine2 <- fread("./sofi_quotedata.csv", skip=3, nrows = 1)
+spotPrice2 <- as.numeric((spotLine2[1,3]))
+spotPrice2
+#spotPrice range
+fromS2 <- 0.7 * spotPrice2
+toS2 <-2.5 * spotPrice2
+todaysDateData2 <-strsplit(as.character(spotLine2[,1]), " ")
+todayYear2 <- todaysDateData2[[1]][4]
+todayMonth2 <- todaysDateData2[[1]][2]
+todayDay2 <- todaysDateData2[[1]][3]
+todayDate2 <-as.Date(ymd(paste0(todayYear2, '-', todayMonth2, '-', todayDay2)))
+colnames(sofiOptChain) <-c('ExpirationDate','Calls','CallLastSale','CallNet','CallBid','CallAsk','CallVol',
+'CallIV','CallDelta','CallGamma','CallOpenInt','StrikePrice','Puts','PutLastSale',
+'PutNet','PutBid','PutAsk','PutVol','PutIV','PutDelta','PutGamma','PutOpenInt')
+sofiOptChain$CallGEX <- sofiOptChain$CallGamma * 100 * sofiOptChain$CallOpenInt * spotPrice2^2 *0.01
+sofiOptChain$PutGEX <- sofiOptChain$PutGamma * 100 * sofiOptChain$PutOpenInt * spotPrice2^2 *0.01 * -1
+sofiOptChain$TotalGamma <- (sofiOptChain$CallGEX + sofiOptChain$PutGEX) / 327
+df2 <- sofiOptChain %>% 
+  filter(StrikePrice > fromS2, StrikePrice < toS2) %>%
+  group_by(StrikePrice) %>% 
+  summarise(CallGEX = sum(CallGEX), PutGEX = sum(PutGEX), TotalGamma = sum(TotalGamma))
+strike2 <- sofiOptChain$StrikePrice
+TotalGam2 <- round(sum(df2$TotalGamma),3)
+sofiSpotExpChart <- plot_ly(df2,x= ~df2$StrikePrice, y = ~df2$TotalGamma, type = "bar", name = "Total Gamma")
+sofiSpotExpChart <- sofiSpotExpChart %>% add_lines(x=spotPrice2, line=list(color= "blue", dash = 'dot'), name= paste('Spot Price: ', round(spotPrice2,0)))
+sofiSpotExpChart <- sofiSpotExpChart %>%layout(
+  title = paste("Total Gamma: $", TotalGam2,  " SOFI ",  todayDate2),
+  xaxis=list(title='Strike Price'),
+  yaxis=list(title='Spot Gamma Exposure ')
+)
+sofiSpotExpChart
+sofiCPGEX <- plot_ly(data = df2, x = ~df2$StrikePrice, y = ~df2$CallGEX, type = 'bar', name = 'Call Gamma')
+sofiCPGEX <- sofiCPGEX %>% add_bars(x = ~df2$StrikePrice,
+y = ~df2$PutGEX, marker = list(color = 'red'), name = 'Put Gamma')
+sofiCPGEX <- sofiCPGEX %>% add_lines(x=spotPrice2,
+ line=list(color= 'blue', dash = 'dot'), name= paste('Spot Price: ', round(spotPrice2,0)))
+sofiCPGEX <- sofiCPGEX %>%layout(title = paste("Total Gamma: $", TotalGam2,  "SOFI Move ",  todayDate2), xaxis=list(title='Strike Price'),yaxis=list(title='Spot Gamma Exposure'))
+sofiCPGEX
+```
+Analysis:
+
+# LCID
+```{r}
+#obtain the last price
+lcidOptChain <-fread("./lcid_quotedata.csv")
+spotLine3 <- fread("./lcid_quotedata.csv", skip=3, nrows = 1)
+spotPrice3 <- as.numeric((spotLine3[1,3]))
+spotPrice3
+#spotPrice range
+fromS3 <- 0.4 * spotPrice3
+toS3 <- 2.8 * spotPrice3
+todaysDateData3 <-strsplit(as.character(spotLine3[,1]), " ")
+todayYear3 <- todaysDateData3[[1]][4]
+todayMonth3 <- todaysDateData3[[1]][2]
+todayDay3 <- todaysDateData3[[1]][3]
+todayDate3 <-as.Date(ymd(paste0(todayYear3, '-', todayMonth3, '-', todayDay3)))
+colnames(lcidOptChain) <-c('ExpirationDate','Calls','CallLastSale','CallNet','CallBid','CallAsk','CallVol',
+'CallIV','CallDelta','CallGamma','CallOpenInt','StrikePrice','Puts','PutLastSale',
+'PutNet','PutBid','PutAsk','PutVol','PutIV','PutDelta','PutGamma','PutOpenInt')
+lcidOptChain$CallGEX <- lcidOptChain$CallGamma * 100 * lcidOptChain$CallOpenInt * spotPrice3^2 *0.01
+lcidOptChain$PutGEX <- lcidOptChain$PutGamma * 100 * lcidOptChain$PutOpenInt * spotPrice3^2 *0.01 * -1
+lcidOptChain$TotalGamma <- (lcidOptChain$CallGEX + lcidOptChain$PutGEX) / 345
+df3 <- lcidOptChain %>% 
+  filter(StrikePrice > fromS3, StrikePrice < toS3) %>%
+  group_by(StrikePrice) %>% 
+  summarise(CallGEX = sum(CallGEX), PutGEX = sum(PutGEX), TotalGamma = sum(TotalGamma))
+strike3 <- lcidOptChain$StrikePrice
+TotalGam3 <- round(sum(df3$TotalGamma),3)
+lcidSpotExpChart <- plot_ly(df3,x= ~df3$StrikePrice, y = ~df3$TotalGamma, type = "bar", name = "Total Gamma")
+lcidSpotExpChart <- lcidSpotExpChart %>% add_lines(x=spotPrice3, line=list(color= "blue", dash = 'dot'), name= paste('Spot Price: ', round(spotPrice3,0)))
+lcidSpotExpChart <- lcidSpotExpChart %>%layout(
+  title = paste("Total Gamma: $", TotalGam3,  " LCID ",  todayDate3),
+  xaxis=list(title='Strike Price'),
+  yaxis=list(title='Spot Gamma Exposure ')
+)
+lcidSpotExpChart
+lcidCPGEX <- plot_ly(data = df3, x = ~df3$StrikePrice, y = ~df3$CallGEX, type = 'bar', name = 'Call Gamma')
+lcidCPGEX <- lcidCPGEX %>% add_bars(x = ~df3$StrikePrice,
+y = ~df3$PutGEX, marker = list(color = 'red'), name = 'Put Gamma')
+lcidCPGEX <- lcidCPGEX %>% add_lines(x=spotPrice3,
+ line=list(color= 'blue', dash = 'dot'), name= paste('Spot Price: ', round(spotPrice3,0)))
+lcidCPGEX <- lcidCPGEX %>%layout(title = paste("Total Gamma: $", TotalGam2,  "LCID ",  todayDate3), xaxis=list(title='Strike Price'),yaxis=list(title='Spot Gamma Exposure'))
+lcidCPGEX
+```
